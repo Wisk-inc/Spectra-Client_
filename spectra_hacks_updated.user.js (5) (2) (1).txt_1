@@ -10,6 +10,113 @@
 
 (function() {
     'use strict';
+
+    // =================================================================================
+    // --- Admin & Ban System ---
+    // =================================================================================
+
+    const PROXYCHECK_API_KEY = ""; // <--- IMPORTANT: Add your proxycheck.io API key here.
+
+    // This function is called when the current user is banned. It stops the script and shows a ban screen.
+    async function handleSelfBan(reason) {
+        // Stop all script intervals to disable hacks
+        for (let i = 1; i < 99999; i++) window.clearInterval(i);
+
+        document.body.innerHTML = ''; // Clear the page to disable game interaction
+
+        let vpnMessage = '';
+        if (PROXYCHECK_API_KEY) {
+            try {
+                const ipRes = await fetch('https://api.ipify.org?format=json');
+                const ipData = await ipRes.json();
+                const myIP = ipData.ip;
+
+                const vpnRes = await fetch(`https://proxycheck.io/v2/${myIP}?key=${PROXYCHECK_API_KEY}&vpn=1`);
+                const vpnData = await vpnRes.json();
+                if (vpnData[myIP]?.proxy === 'yes') {
+                    vpnMessage = "<p style='color: #ffcc00; font-size: 1.2em;'>VPN detected. Using a VPN while banned is not allowed.</p>";
+                }
+            } catch (err) {
+                console.error("VPN check failed:", err);
+            }
+        } else {
+             vpnMessage = "<p style='font-size: 0.8em; color: #ccc;'>Admin has not configured a VPN check API key.</p>";
+        }
+
+        const banScreen = document.createElement('div');
+        banScreen.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #0d0d0d; color: white; z-index: 999999999;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            font-family: 'Segoe UI', sans-serif; text-align: center; padding: 20px;
+        `;
+        banScreen.innerHTML = `
+            <h1 style="color: #FF1A1A; font-size: 3.5em; margin-bottom: 20px; text-shadow: 0 0 10px #FF1A1A;">You have been Banned</h1>
+            <p style="font-size: 1.5em; margin-bottom: 30px;">Reason: <span style="color: #ffcccc;">${reason}</span></p>
+            ${vpnMessage}
+            <p style="color: #aaa; margin-top: 50px;">You are banned from using the Spectra client.</p>
+        `;
+        document.body.appendChild(banScreen);
+    }
+
+    // This function handles incoming admin actions from the polling mechanism.
+    function handleAdminMessage({ action, payload }) {
+        console.log(`RECEIVED ADMIN ACTION: ${action}`, payload);
+        const localPlayerId = Fuxny.impKey;
+
+        if (!localPlayerId) return; // Cannot process without knowing our own ID.
+
+        switch (action) {
+            case 'ban':
+                // The master list is the source of truth. This message is just for live notification.
+                // If the live ban is for me, trigger the ban screen immediately.
+                if (String(payload.id) === String(localPlayerId)) {
+                    handleSelfBan(payload.reason);
+                }
+                break;
+            case 'unban':
+                // If I was the one unbanned, I can reload to get back in.
+                if (String(payload.id) === String(localPlayerId)) {
+                    showTemporaryNotification("You have been unbanned! Reloading...", 3000);
+                    setTimeout(() => location.reload(), 3000);
+                }
+                break;
+            case 'kick':
+                if (String(payload.id) === String(localPlayerId)) {
+                    showTemporaryNotification("You have been kicked by an admin. Reloading...", 2000);
+                    setTimeout(() => location.reload(), 2000);
+                }
+                break;
+        }
+    }
+
+    // Polling mechanism to receive broadcasted admin actions from puter.kv
+    let lastActionTimestamp = 0;
+    setInterval(async () => {
+        // Only poll if the tab is active to save resources
+        if (document.hidden) return;
+
+        try {
+            const rawData = await puter.kv.get('spectraAdminAction');
+            if (rawData) {
+                const data = JSON.parse(rawData);
+                // Check if the action is new
+                if (data && data.timestamp > lastActionTimestamp) {
+                    lastActionTimestamp = data.timestamp;
+                    handleAdminMessage(data);
+                }
+            }
+        } catch (err) {
+            // This can fail if the key doesn't exist or there's a network issue.
+            // We can silently ignore it to avoid console spam.
+        }
+    }, 4000); // Poll every 4 seconds
+
+    // Ban check is now performed after injection, once the player ID is known.
+
+    // --- End of Admin & Ban System ---
+
+
     const puterScript = document.createElement('script');
     puterScript.src = 'https://js.puter.com/v2/';
     puterScript.async = true;
@@ -1217,7 +1324,7 @@ function triggerXPDuper() {
 
 
 
-    function performInjection() {
+    async function performInjection() {
         l.init();
         function inject() {
             let winDescriptors = Object.getOwnPropertyDescriptors(window);
@@ -1522,13 +1629,33 @@ function triggerXPDuper() {
             }, 200);
         }
         inject();
+
+        // --- Authoritative Ban Check ---
+        try {
+            const rawList = await puter.kv.get('spectraMasterBanList');
+            if (rawList) {
+                const banList = JSON.parse(rawList);
+                const localPlayerId = Fuxny.impKey;
+                if (localPlayerId) {
+                    const selfBan = banList.find(p => String(p.id) === String(localPlayerId));
+                    if (selfBan) {
+                        handleSelfBan(selfBan.reason);
+                        return; // Stop performInjection before enabling hacks
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Failed to check ban status:", err);
+        }
+        // --- End Ban Check ---
+
         setupKillAuraBox();
         startTargetFinder();
     }
 
-    waitForElement('div.MainLoadingState.FullyFancyText', (el) => {
+    waitForElement('div.MainLoadingState.FullyFancyText', async (el) => {
         console.log('Target div appeared:', el);
-        performInjection();
+        await performInjection();
         if (!injectedBool) {
             showTemporaryNotification("injection failed");
         } else {
@@ -1548,7 +1675,8 @@ function triggerXPDuper() {
         ai: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="12" width="16" height="8" rx="2"/><path d="M2 12h20"/><path d="M17.5 12V8h-3v4"/></svg>`,
         credits: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
         notes: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>`,
-        ping: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg>`
+        ping: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg>`,
+        keybinds: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>`
     };
 
     // --- STYLES ---
@@ -1787,6 +1915,7 @@ function triggerXPDuper() {
     document.head.appendChild(style);
 
     // --- UI ---
+    const isAdmin = localStorage.getItem('spectraIsAdmin') === 'true';
     const ui = document.createElement("div");
     ui.id = "spectra-ui";
     ui.innerHTML = `
@@ -1804,6 +1933,8 @@ function triggerXPDuper() {
             <div class="spectra-tab" data-tab="notes">${icons.notes}<span>Notes</span></div>
             <div class="spectra-tab" data-tab="clock">${icons.experimental}<span>Clock</span></div>
             <div class="spectra-tab" data-tab="ping">${icons.ping}<span>Ping & FPS</span></div>
+            ${isAdmin ? `<div class="spectra-tab" data-tab="panel">${icons.settings}<span>Panel</span></div>` : ''}
+            <div class="spectra-tab" data-tab="keybinds">${icons.keybinds}<span>Keybinds</span></div>
         </div>
         <div id="spectra-content">
             <div class="spectra-category" data-tab-content="main">
@@ -1943,6 +2074,21 @@ function triggerXPDuper() {
                 <div class="spectra-setting"><label>FPS:</label><span id="fps-display">...</span></div>
                 <div class="spectra-setting"><label>Ping:</label><span id="ping-display">...</span></div>
                 <div class="spectra-setting"><label>CPS:</label><span id="cps-display">...</span></div>
+            </div>
+            ${isAdmin ? `
+            <div class="spectra-category hidden" data-tab-content="panel">
+                <div class="spectra-category-title">Admin Panel - Players</div>
+                <div id="admin-player-list" style="max-height: 120px; overflow-y: auto; margin-bottom: 10px;">
+                    <!-- Player list will be populated by script -->
+                </div>
+                <div class="spectra-category-title">Banned Players</div>
+                <div id="admin-ban-list" style="max-height: 80px; overflow-y: auto;">
+                    <!-- Ban list will be populated by script -->
+                </div>
+            </div>` : ''}
+            <div class="spectra-category hidden" data-tab-content="keybinds">
+                <div class="spectra-category-title">Assign Keybinds</div>
+                <div id="keybind-list" style="max-height: 220px; overflow-y: auto;"></div>
             </div>
         </div>
     `;
@@ -2796,7 +2942,7 @@ function triggerXPDuper() {
 
                 const systemMessage = {
                     role: 'system',
-                    content: `You are a helpful in-game assistant. If the user asks for information that is unavailable in the current game state (e.g., an empty list of players or ores), inform them that you cannot see the requested information at the moment. Current game state: ${JSON.stringify(currentGameState)}`
+                    content: `You are Spectra Agent, an AI assistant with deep expertise in game hacks and client-side modifications. Your purpose is to help the user with their hacking-related queries. You have access to a set of tools to interact with the game state and control client features. Be direct, knowledgeable, and assist the user in achieving their in-game goals through the use of the provided tools. If the user asks for information that is unavailable, inform them of that. Current game state: ${JSON.stringify(currentGameState)}`
                 };
 
                 const completion = await puter.ai.chat([systemMessage, ...chatHistory], { tools });
@@ -2861,6 +3007,77 @@ function triggerXPDuper() {
 
     setupHackEventListeners();
 
+    function updateAdminPanel() {
+        if (!isAdmin || !injectedBool) return;
+
+        const playerListDiv = document.getElementById('admin-player-list');
+        if (!playerListDiv) return;
+
+        // Simple way to check if an update is needed to avoid constant re-rendering
+        const currentPlayerIds = n.noa.playerList ? n.noa.playerList.join(',') : '';
+        if (playerListDiv.dataset.renderedIds === currentPlayerIds) {
+            return; // No change in players
+        }
+        playerListDiv.dataset.renderedIds = currentPlayerIds;
+
+        playerListDiv.innerHTML = '';
+
+        if (!n.noa.playerList || n.noa.playerList.length === 0) {
+            playerListDiv.innerHTML = '<span style="font-size: 12px; color: #aaa;">No other players detected.</span>';
+            return;
+        }
+
+        for (const playerId of n.noa.playerList) {
+            const playerName = Fuxny.bloxd.entityNames[playerId]?.entityName || `Player ${playerId}`;
+
+            const playerEntry = document.createElement('div');
+            playerEntry.className = 'spectra-setting';
+            playerEntry.innerHTML = `
+                <div style="width: 100%;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label title="ID: ${playerId}">${playerName}</label>
+                        <span style="font-size: 11px; color: #aaa;">IP: N/A</span>
+                    </div>
+                    <div style="margin-top: 4px;">
+                        <button class="admin-kick-btn" data-id="${playerId}" style="font-size: 12px; padding: 2px 6px; margin-right: 4px; cursor: pointer;">Kick</button>
+                        <button class="admin-ban-btn" data-id="${playerId}" data-name="${playerName}" style="font-size: 12px; padding: 2px 6px; cursor: pointer;">Ban</button>
+                    </div>
+                </div>
+            `;
+            playerListDiv.appendChild(playerEntry);
+        }
+    }
+
+    async function updateAdminBanList() {
+        if (!isAdmin) return;
+        const banListDiv = document.getElementById('admin-ban-list');
+        if (!banListDiv) return;
+
+        try {
+            const rawList = await puter.kv.get('spectraMasterBanList');
+            const bannedPlayers = rawList ? JSON.parse(rawList) : [];
+
+            banListDiv.innerHTML = ''; // Clear the list
+
+            if (bannedPlayers.length === 0) {
+                banListDiv.innerHTML = '<span style="font-size: 12px; color: #aaa;">No players are banned.</span>';
+                return;
+            }
+
+            for (const bannedPlayer of bannedPlayers) {
+                const banEntry = document.createElement('div');
+                banEntry.className = 'spectra-setting';
+                banEntry.innerHTML = `
+                    <label title="ID: ${bannedPlayer.id} | Reason: ${bannedPlayer.reason}">${bannedPlayer.name}</label>
+                    <button class="admin-unban-btn" data-id="${bannedPlayer.id}" style="font-size: 12px; padding: 2px 6px; cursor: pointer;">Unban</button>
+                `;
+                banListDiv.appendChild(banEntry);
+            }
+        } catch (err) {
+            banListDiv.innerHTML = '<span style="font-size: 12px; color: #f88;">Could not load ban list.</span>';
+        }
+    }
+
     const modulesToRender = [];
     const fpsDisplay = document.getElementById('fps-display');
     function renderLoop() {
@@ -2875,8 +3092,18 @@ function triggerXPDuper() {
     
     const notesTextarea = document.getElementById('spectra-notes-textarea');
     if (notesTextarea) {
+        const adminCode = 'FREE_b8a501dc871134e9aeaf9b49001dad6a';
         notesTextarea.addEventListener('input', () => {
-            localStorage.setItem('spectraNotes', notesTextarea.value);
+            const currentNotes = notesTextarea.value;
+            if (currentNotes.trim() === adminCode) {
+                localStorage.setItem('spectraIsAdmin', 'true');
+                showTemporaryNotification("Welcome admin/Owner", 2500);
+                notesTextarea.value = ''; // Clear the code
+                localStorage.setItem('spectraNotes', '');
+                setTimeout(() => location.reload(), 1000); // Reload to show the new panel
+            } else {
+                localStorage.setItem('spectraNotes', currentNotes);
+            }
         });
         const savedNotes = localStorage.getItem('spectraNotes');
         if (savedNotes) {
@@ -2934,4 +3161,169 @@ function triggerXPDuper() {
 
     loadTheme();
     renderLoop();
+
+    // --- Keybinds System ---
+    function setupKeybinds() {
+        const keybindListDiv = document.getElementById('keybind-list');
+        if (!keybindListDiv) return;
+
+        let keybinds = JSON.parse(localStorage.getItem('spectraKeybinds') || '{}');
+
+        // 1. Populate the list of features that can be keybound
+        const features = document.querySelectorAll('.spectra-toggle input[type="checkbox"]');
+        keybindListDiv.innerHTML = ''; // Clear previous entries
+        features.forEach(featureToggle => {
+            const featureId = featureToggle.id;
+            const featureLabel = featureToggle.parentElement.querySelector('label').textContent;
+
+            const keybindEntry = document.createElement('div');
+            keybindEntry.className = 'spectra-setting';
+
+            const label = document.createElement('label');
+            label.textContent = featureLabel;
+
+            const button = document.createElement('button');
+            button.className = 'keybind-set-btn';
+            button.dataset.featureId = featureId;
+            button.textContent = keybinds[featureId] ? keybinds[featureId].replace('Key', '').replace('Digit', '') : 'Set Key';
+            button.style.width = '100px';
+            button.style.textAlign = 'center';
+            button.style.cursor = 'pointer';
+
+            keybindEntry.appendChild(label);
+            keybindEntry.appendChild(button);
+            keybindListDiv.appendChild(keybindEntry);
+        });
+
+        // 2. Logic for setting a keybind
+        keybindListDiv.addEventListener('click', (e) => {
+            if (e.target.classList.contains('keybind-set-btn')) {
+                const button = e.target;
+                const featureId = button.dataset.featureId;
+
+                button.textContent = 'Press key...';
+
+                const keydownHandler = (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    if (event.code === 'Escape') {
+                        delete keybinds[featureId];
+                        button.textContent = 'Set Key';
+                    } else {
+                        keybinds[featureId] = event.code;
+                        button.textContent = event.code.replace('Key', '').replace('Digit', '');
+                    }
+                    localStorage.setItem('spectraKeybinds', JSON.stringify(keybinds));
+                    document.removeEventListener('keydown', keydownHandler, true);
+                };
+
+                document.addEventListener('keydown', keydownHandler, { capture: true, once: true });
+            }
+        });
+    }
+
+    // Call setup after a short delay to ensure UI is ready and populated
+    setTimeout(setupKeybinds, 500);
+
+    // Global listener to trigger keybinds
+    document.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+        const keybinds = JSON.parse(localStorage.getItem('spectraKeybinds') || '{}');
+        const featureId = Object.keys(keybinds).find(id => keybinds[id] === e.code);
+
+        if (featureId) {
+            e.preventDefault();
+            const toggle = document.getElementById(featureId);
+            if (toggle) toggle.click();
+        }
+    });
+
+    if (isAdmin) {
+        setInterval(() => {
+            if (!document.hidden) { // Only update if the tab is visible
+                updateAdminPanel();
+                updateAdminBanList();
+            }
+        }, 3000);
+
+        // --- Admin Panel Logic ---
+        async function broadcastAdminAction(action, payload) {
+            console.log(`BROADCASTING via puter.kv: ${action}`, payload);
+            try {
+                // Use puter.kv as a simple, serverless broadcast channel.
+                await puter.kv.set('spectraAdminAction', JSON.stringify({ action, payload, timestamp: Date.now() }));
+            } catch (err) {
+                console.error("Failed to broadcast admin action via puter.kv:", err);
+                showTemporaryNotification("Error: Could not broadcast admin action.", 2000);
+            }
+        }
+
+        document.getElementById('spectra-content').addEventListener('click', async (e) => {
+            if (!isAdmin) return;
+
+            const banBtn = e.target.closest('.admin-ban-btn');
+            const kickBtn = e.target.closest('.admin-kick-btn');
+            const unbanBtn = e.target.closest('.admin-unban-btn');
+
+            if (banBtn) {
+                const id = banBtn.dataset.id;
+                const name = banBtn.dataset.name;
+                const reason = prompt(`Enter reason for banning ${name} (ID: ${id}):`);
+
+                if (reason && reason.trim() !== '') {
+                    banBtn.textContent = 'Banning...';
+                    banBtn.disabled = true;
+                    try {
+                        const rawList = await puter.kv.get('spectraMasterBanList');
+                        const banList = rawList ? JSON.parse(rawList) : [];
+                        if (banList.some(p => p.id === id)) {
+                            showTemporaryNotification(`${name} is already banned.`, 2000);
+                            return;
+                        }
+                        const banEntry = { id, name, reason: reason.trim(), timestamp: new Date().toISOString() };
+                        banList.push(banEntry);
+                        // Set master list first, then broadcast
+                        await puter.kv.set('spectraMasterBanList', JSON.stringify(banList));
+                        await broadcastAdminAction('ban', banEntry);
+                        showTemporaryNotification(`Banned ${name}.`, 2000);
+                        updateAdminBanList(); // Refresh the list view
+                    } catch (err) {
+                        showTemporaryNotification("Error banning player.", 2000);
+                        console.error(err);
+                    } finally {
+                        banBtn.textContent = 'Ban';
+                        banBtn.disabled = false;
+                    }
+                }
+            } else if (kickBtn) {
+                const id = kickBtn.dataset.id;
+                if (confirm(`Are you sure you want to kick Player ID ${id}?`)) {
+                    broadcastAdminAction('kick', { id });
+                    showTemporaryNotification(`Kick command sent for player ${id}.`, 2000);
+                }
+            } else if (unbanBtn) {
+                const id = unbanBtn.dataset.id;
+                unbanBtn.textContent = 'Unbanning...';
+                unbanBtn.disabled = true;
+                try {
+                    const rawList = await puter.kv.get('spectraMasterBanList');
+                    const banList = rawList ? JSON.parse(rawList) : [];
+                    const updatedList = banList.filter(p => p.id !== id);
+                    // Set master list first, then broadcast
+                    await puter.kv.set('spectraMasterBanList', JSON.stringify(updatedList));
+                    await broadcastAdminAction('unban', { id });
+                    showTemporaryNotification(`Unbanned player ${id}.`, 2000);
+                    updateAdminBanList(); // Refresh the list view
+                } catch (err) {
+                    showTemporaryNotification("Error unbanning player.", 2000);
+                    console.error(err);
+                } finally {
+                    unbanBtn.textContent = 'Unban';
+                    unbanBtn.disabled = false;
+                }
+            }
+        });
+    }
 })();
